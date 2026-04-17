@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base application theme — Compose Material3 handles all styling.
+         This entry exists only to satisfy the AndroidManifest reference. -->
+    <style name="Theme.VulnChat" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

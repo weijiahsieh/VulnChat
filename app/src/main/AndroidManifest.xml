@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network access for LLM API calls -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required for Android Keystore key generation -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+
+    <application
+        android:name=".VulnChatApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.VulnChat"
+        android:usesCleartextTraffic="false">
+        <!--
+            usesCleartextTraffic="false" — blocks HTTP (non-TLS) traffic at
+            the OS level, independently of our OkHttp ConnectionSpec setting.
+            Defense in depth: even if the client is misconfigured, the OS
+            will reject cleartext connections.
+
+            For the vulnerable build demo you can temporarily flip this to
+            "true" to show cleartext interception with MitmProxy, then
+            restore it for the hardened demo.
+        -->
+
+    </application>
+
+</manifest>

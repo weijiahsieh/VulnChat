@@ -1,0 +1,51 @@
+# ── Gradle ────────────────────────────────────────────────────────────────────
+.gradle/
+build/
+**/build/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# ── Android Studio / IntelliJ ─────────────────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# ── Secrets — never commit these ──────────────────────────────────────────────
+# API keys and signing configs must stay out of version control.
+# Use secrets.properties (see README) for local development.
+secrets.properties
+keystore.jks
+*.keystore
+*.jks
+release.keystore
+
+# ── Generated ─────────────────────────────────────────────────────────────────
+gen/
+out/
+*.class
+*.apk
+*.aab
+*.dex
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+app/release/
+
+# ── Lint ──────────────────────────────────────────────────────────────────────
+lint/
+*.lint.xml
+
+# ── Kotlin ────────────────────────────────────────────────────────────────────
+*.kotlin_module
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/

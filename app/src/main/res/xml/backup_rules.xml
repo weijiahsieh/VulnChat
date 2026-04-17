@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Auto-backup rules for Android 6–11 (pre data-extraction-rules era).
+    Mirrors the exclusions in data_extraction_rules.xml.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="vulnchat_key_store.xml" />
+    <exclude domain="database"   path="." />
+    <exclude domain="file"       path="." />
+</full-backup-content>
