@@ -1,16 +1,16 @@
-package com.weijia.vulnchat
+package com.vulnchat
 
 import android.app.Application
-import com.weijia.vulnchat.security.ApiKeyProvider
+import com.vulnchat.security.ApiKeyProvider
 
 /**
  * Application entry point.
  *
- * Calls [ApiKeyProvider.provisionIfNeeded] at startup so the Keystore
+ * Calls ApiKeyProvider.provisionIfNeeded at startup so the Keystore
  * key is generated before the first chat message is sent, avoiding
  * first-message latency in the hardened build.
  *
- * In the vulnerable build [provisionIfNeeded] is a no-op.
+ * In the vulnerable build provisionIfNeeded is a no-op.
  */
 class VulnChatApplication : Application() {
 

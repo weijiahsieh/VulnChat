@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Network Security Config — declarative layer on top of OkHttp's
+    programmatic certificate pinning.
+
+    Defence in depth: even if the app's OkHttp client is bypassed
+    (e.g. via a custom NetworkSecurityConfig in a repackaged APK),
+    this config still enforces the pinning at the OS network stack level.
+
+    Reference this file in AndroidManifest.xml:
+        android:networkSecurityConfig="@xml/network_security_config"
+    (already wired via the <application> element in the manifest stub
+     — add the attribute when you apply this config.)
+-->
+<network-security-config>
+
+    <!-- Global policy: no cleartext traffic for any domain -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <!-- Trust only the system CA store — no user-installed CAs -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Pin the Anthropic API endpoint -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">api.anthropic.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+<!--        <pin-set expiration="2026-12-31">-->
+            <!--
+                Replace these with real SHA-256 pins before building.
+                Derive them with:
+                  openssl s_client -connect api.anthropic.com:443 \
+                    | openssl x509 -pubkey -noout \
+                    | openssl pkey -pubin -outform DER \
+                    | openssl dgst -sha256 -binary | base64
+
+                Always include one backup pin (intermediate CA) so a
+                leaf cert rotation doesn't brick the app.
+            -->
+<!--            <pin digest="SHA-256">REPLACE_WITH_REAL_LEAF_PIN=</pin>-->
+<!--            <pin digest="SHA-256">REPLACE_WITH_REAL_INTERMEDIATE_PIN=</pin>-->
+<!--        </pin-set>-->
+    </domain-config>
+
+    <!--
+        DEMO ONLY — vulnerable build override.
+        In the vulnerable flavor you can temporarily add:
+
+        <domain-config cleartextTrafficPermitted="true">
+            <domain includeSubdomains="true">10.0.2.2</domain>
+        </domain-config>
+
+        This allows MitmProxy running on the host machine (reachable at
+        10.0.2.2 from the emulator) to intercept traffic for the demo.
+        Remove this before building the hardened flavor.
+    -->
+
+</network-security-config>

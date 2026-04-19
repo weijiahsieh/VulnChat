@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Overridden per flavor in build.gradle.kts via resValue() -->
+    <string name="app_name">VulnChat</string>
+
+    <!-- Chat UI -->
+    <string name="hint_message_input">Message VulnChat…</string>
+    <string name="button_send">Send</string>
+    <string name="label_you">You</string>
+    <string name="label_assistant">VulnChat</string>
+
+    <!-- Security feedback messages shown to the user -->
+    <string name="error_blocked_regex">Message blocked: matched an injection pattern.</string>
+    <string name="error_blocked_classifier">Message blocked: flagged as a potential attack.</string>
+    <string name="error_classifier_failed">Security check failed. Please try again.</string>
+    <string name="error_rate_limit">Too many messages. Please wait a moment.</string>
+    <string name="error_network">Network error. Check your connection and try again.</string>
+    <string name="error_api">API error. Please try again.</string>
+
+    <!-- Security mode banner (visible in the UI for demo clarity) -->
+    <string name="banner_vulnerable">⚠ Vulnerable build — attacks enabled</string>
+    <string name="banner_hardened">🔒 Hardened build — defenses active</string>
+</resources>

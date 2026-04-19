@@ -14,11 +14,11 @@ val secrets = Properties().apply {
 }
 
 android {
-    namespace   = "com.weijia.vulnchat"
+    namespace   = "com.vulnchat"
     compileSdk  = 36
 
     defaultConfig {
-        applicationId   = "com.weijia.vulnchat"
+        applicationId   = "com.vulnchat"
         minSdk          = 26          // Keystore AES-GCM reliable from API 26
         targetSdk       = 36
         versionCode     = 1
@@ -103,6 +103,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
 
     // ── Compose ───────────────────────────────────────────────────────

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Data extraction rules (Android 12+).
+    Prevents the OS from including sensitive app data in cloud backups
+    or device-to-device transfers.
+
+    We exclude everything under the app's data directory because:
+      - The encrypted API key ciphertext (vulnchat_key_store) must not
+        leave the device — it is tied to THIS device's Keystore HSM and
+        would be undecryptable on any other device anyway.
+      - Conversation history may contain sensitive user data.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="vulnchat_key_store.xml" />
+        <exclude domain="database"   path="." />
+        <exclude domain="file"       path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="vulnchat_key_store.xml" />
+        <exclude domain="database"   path="." />
+        <exclude domain="file"       path="." />
+    </device-transfer>
+</data-extraction-rules>
