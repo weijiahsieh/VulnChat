@@ -49,3 +49,4 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+/gradle/gradle-daemon-jvm.properties
