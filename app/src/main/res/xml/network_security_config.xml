@@ -28,8 +28,8 @@
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
-<!--        <pin-set expiration="2026-12-31">-->
-            <!--
+        <pin-set expiration="2026-12-31">
+
                 Replace these with real SHA-256 pins before building.
                 Derive them with:
                   openssl s_client -connect api.anthropic.com:443 \
@@ -39,10 +39,10 @@
 
                 Always include one backup pin (intermediate CA) so a
                 leaf cert rotation doesn't brick the app.
-            -->
-<!--            <pin digest="SHA-256">REPLACE_WITH_REAL_LEAF_PIN=</pin>-->
-<!--            <pin digest="SHA-256">REPLACE_WITH_REAL_INTERMEDIATE_PIN=</pin>-->
-<!--        </pin-set>-->
+
+            <pin digest="SHA-256">LQfSFZEKft9yS7oIKOIO5Vu7Fj33L2H3SDN8/uADlWg=</pin>
+            <pin digest="SHA-256">kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=</pin>
+        </pin-set>
     </domain-config>
 
     <!--

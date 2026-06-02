@@ -29,10 +29,10 @@ import kotlin.coroutines.resumeWithException
  * LlmApiClient — the single exit point for all outbound LLM requests.
  *
  * Responsibilities:
- *   1. Attach the API key from ApiKeyProvider (never hardcoded here).
+ *   1. Attach the API key from [ApiKeyProvider] (never hardcoded here).
  *   2. Enforce TLS 1.3 + certificate pinning on every connection.
- *   3. Stream token-by-token responses via SSE as a Flow<String>.
- *   4. Provide a blocking classifyIntent call used by InputFilter.
+ *   3. Stream token-by-token responses via SSE as a [Flow<String>].
+ *   4. Provide a blocking [classifyIntent] call used by [InputFilter].
  *
  * Two build modes (BuildConfig.SECURE_MODE):
  *   VULNERABLE — no cert pinning, verbose logging, plain key in header.
@@ -40,9 +40,9 @@ import kotlin.coroutines.resumeWithException
  *
  * Portfolio demo note:
  *   The pinning bypass demo uses MitmProxy + a custom CA. On the
- *   vulnerable build the proxy intercepts the request, and you can read
+ *   vulnerable build the proxy intercepts the request and you can read
  *   the API key and full prompt in clear text. On the hardened build the
- *   handshake fails with a CertificatePinningException.
+ *   handshake fails with a [CertificatePinningException].
  */
 class LlmApiClient(private val keyProvider: ApiKeyProvider) {
 
@@ -112,9 +112,9 @@ class LlmApiClient(private val keyProvider: ApiKeyProvider) {
             .add(
                 API_HOST,
                 // Leaf certificate pin (replace with real value)
-                "sha256/REPLACE_WITH_REAL_LEAF_PIN=",
+                "sha256/LQfSFZEKft9yS7oIKOIO5Vu7Fj33L2H3SDN8/uADlWg=",
                 // Intermediate CA pin — backup if leaf rotates
-                "sha256/REPLACE_WITH_REAL_INTERMEDIATE_PIN="
+                "sha256/kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4="
             )
             .build()
     }
@@ -124,7 +124,7 @@ class LlmApiClient(private val keyProvider: ApiKeyProvider) {
     // ─────────────────────────────────────────────────────────────────
 
     /**
-     * Sends a full conversation to the LLM and returns a Flow that
+     * Sends a full conversation to the LLM and returns a [Flow] that
      * emits each text delta as it arrives via SSE.
      *
      * The caller (ChatViewModel) collects the flow and appends each
@@ -180,66 +180,78 @@ class LlmApiClient(private val keyProvider: ApiKeyProvider) {
      *
      * This is a suspending function wrapping an OkHttp callback — it
      * bridges the callback world into coroutines via
-     * suspendCancellableCoroutine.
+     * [suspendCancellableCoroutine].
      *
      * Not streamed — the classifier response is short (one word) so SSE
      * overhead is unnecessary.
      */
-    suspend fun classifyIntent(classifierPrompt: String): String =
-        suspendCancellableCoroutine { cont ->
+    suspend fun classifyIntent(
+        systemPrompt: String,
+        userMessage:  String
+    ): String = suspendCancellableCoroutine { cont ->
 
-            val body = buildClassifierRequestBody(classifierPrompt)
-            val request = buildRequest(CHAT_ENDPOINT, body)
-            val call = httpClient.newCall(request)
+        val body = buildClassifierRequestBody(systemPrompt, userMessage)
+        val request = buildRequest(CHAT_ENDPOINT, body, isClassifier = true)
+        val call = httpClient.newCall(request)
 
-            cont.invokeOnCancellation { call.cancel() }
+        cont.invokeOnCancellation { call.cancel() }
 
-            call.enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    cont.resumeWithException(LlmNetworkException("Classifier call failed", e))
-                }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                Log.i("LlmApiClient", "classifyIntent onFailure")
+                Log.e("LlmApiClient", "error=${e.message}")
+                cont.resumeWithException(LlmNetworkException("Classifier call failed", e))
+            }
 
-                override fun onResponse(call: Call, response: Response) {
-                    response.use {
-                        if (!response.isSuccessful) {
-                            cont.resumeWithException(
-                                LlmApiException(response.code, response.body?.string() ?: "")
-                            )
-                            return
-                        }
-                        try {
-                            val json = JSONObject(response.body!!.string())
-                            val text = json
-                                .getJSONArray("content")
-                                .getJSONObject(0)
-                                .getString("text")
-                            cont.resume(text)
-                        } catch (e: Exception) {
-                            cont.resumeWithException(
-                                LlmParseException("Failed to parse classifier response", e)
-                            )
-                        }
+            override fun onResponse(call: Call, response: Response) {
+                Log.i("LlmApiClient", "classifyIntent onResponse=${response.body}")
+                response.use {
+                    if (!response.isSuccessful) {
+                        cont.resumeWithException(
+                            LlmApiException(response.code, response.body?.string() ?: "")
+                        )
+                        return
+                    }
+                    try {
+                        val json = JSONObject(response.body!!.string())
+                        val text = json
+                            .getJSONArray("content")
+                            .getJSONObject(0)
+                            .getString("text")
+                        cont.resume(text)
+                    } catch (e: Exception) {
+                        cont.resumeWithException(
+                            LlmParseException("Failed to parse classifier response", e)
+                        )
                     }
                 }
-            })
-        }
+            }
+        })
+    }
 
     // ─────────────────────────────────────────────────────────────────
     // Request builders
     // ─────────────────────────────────────────────────────────────────
 
-    private fun buildRequest(endpoint: String, body: String): Request {
+    private fun buildRequest(
+        endpoint:     String,
+        body:         String,
+        isClassifier: Boolean = false
+    ): Request {
         val apiKey = keyProvider.getApiKey()
-
+        Log.i("LlmApiClient", "apiKey=$apiKey")
         return Request.Builder()
             .url("$BASE_URL$endpoint")
             .post(body.toRequestBody(JSON_MEDIA_TYPE))
-            // Anthropic auth header
             .header("x-api-key", apiKey)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
-            // Accept SSE for streaming calls — server ignores for non-stream requests
             .header("accept", "text/event-stream")
+            .apply {
+                // Classifier marker is read by RateLimitInterceptor to use
+                // the separate classifier quota — stripped before hitting the wire.
+                if (isClassifier) header(RateLimitInterceptor.CLASSIFIER_MARKER_HEADER, "1")
+            }
             .build()
     }
 
@@ -266,14 +278,18 @@ class LlmApiClient(private val keyProvider: ApiKeyProvider) {
         }.toString()
     }
 
-    private fun buildClassifierRequestBody(prompt: String): String {
+    private fun buildClassifierRequestBody(
+        systemPrompt: String,
+        userMessage:  String
+    ): String {
         return JSONObject().apply {
-            put("model", CLASSIFIER_MODEL_ID)  // faster/cheaper model for binary classify
-            put("max_tokens", 10)              // "SAFE" or "ATTACK" only — hard cap
+            put("model", CLASSIFIER_MODEL_ID)
+            put("max_tokens", 16)       // "SAFE" or "ATTACK" + punctuation — small buffer
+            put("system", systemPrompt) // ← proper system turn, not mixed into user message
             put("messages", JSONArray().apply {
                 put(JSONObject().apply {
                     put("role", "user")
-                    put("content", prompt)
+                    put("content", userMessage)
                 })
             })
             put("stream", false)
@@ -285,8 +301,8 @@ class LlmApiClient(private val keyProvider: ApiKeyProvider) {
     // ─────────────────────────────────────────────────────────────────
 
     /**
-     * Reads an SSE response body line by line and invokes onEvent for
-     * each text delta and for the final StreamEvent.Done signal.
+     * Reads an SSE response body line by line and invokes [onEvent] for
+     * each text delta and for the final [StreamEvent.Done] signal.
      *
      * Anthropic SSE format:
      *   event: content_block_delta
@@ -397,3 +413,4 @@ sealed class StreamEvent {
 class LlmNetworkException(msg: String, cause: Throwable? = null) : IOException(msg, cause)
 class LlmApiException(val code: Int, val body: String) : Exception("API error $code: $body")
 class LlmParseException(msg: String, cause: Throwable? = null) : Exception(msg, cause)
+
