@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import com.vulnchat.rag.RagRetriever
+import com.vulnchat.rag.TrustLevel
 
 /**
  * ChatViewModel — the central coordinator for the VulnChat conversation flow.
@@ -89,6 +91,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Tracks the active streaming job so the user can cancel mid-response
     private var streamingJob: Job? = null
 
+    private val ragRetriever = RagRetriever()
+
+    val indexedDocumentCount: StateFlow<Int> get() = ragRetriever.documentCount
+
+    /** True when the configured embedding provider sends text off-device. */
+    val embeddingLeavesDevice: Boolean get() = ragRetriever.embeddingTransmitsOffDevice
+
     // ─────────────────────────────────────────────────────────────────
     // User actions
     // ─────────────────────────────────────────────────────────────────
@@ -145,11 +154,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             val sanitisedInput = filterResult.sanitised
 
+            // ── RAG retrieval ────────────────────────────────────────────
+            // Runs AFTER InputFilter, never before. A blocked query must not
+            // be embedded: it wastes a call, and on the remote-embedding path
+            // it would transmit the attacker's payload off-device. This
+            // ordering is the reason retrieval lives here rather than inside
+            // RagRetriever.retrieve().
+            val retrieval = ragRetriever.retrieve(sanitisedInput)
+
+            // Retrieved context is prepended to the user turn, INSIDE the
+            // wrapped message. Two properties matter:
+            //   1. It is part of the user turn, not the system prompt — so it
+            //      never has system-level authority.
+            //   2. wrapUserMessage() wraps the whole thing, so the model sees
+            //      one bounded user turn rather than a context block floating
+            //      at the same level as real instructions.
+            val apiText = if (retrieval.isEmpty) {
+                SystemPrompt.wrapUserMessage(sanitisedInput)
+            } else {
+                SystemPrompt.wrapUserMessage(
+                    "${retrieval.contextBlock}\n\n$sanitisedInput"
+                )
+            }
+
             // ── Add user message to UI and API history ───────────────────────
             repository.addUserMessage(
-                text        = SystemPrompt.wrapUserMessage(sanitisedInput),
-                displayText = sanitisedInput   // show unwrapped text in the bubble
+                text        = apiText,
+                displayText = sanitisedInput   // bubble shows only what they typed
             )
+
+            if (!retrieval.isEmpty) {
+                val sources = retrieval.chunks
+                    .map { it.chunk.sourceTitle }
+                    .distinct()
+                    .joinToString(", ")
+                repository.addSystemNotice("Referenced: $sources")
+            }
 
             // ── Begin assistant response placeholder ─────────────────────────
             val assistantMsgId = repository.beginAssistantMessage()
@@ -288,7 +328,69 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 "⚠ Response blocked: violated output policy."
         }
     }
+
+    /**
+     * Ingests a document into the RAG index.
+     *
+     * [trustLevel] defaults to USER because this path is a deliberate user
+     * action — they chose the file. Content arriving from a share intent or
+     * a fetched URL must pass UNTRUSTED explicitly.
+     */
+    fun ingestDocument(
+        title: String,
+        content: String,
+        source: String,
+        trustLevel: TrustLevel = TrustLevel.USER
+    ) {
+        viewModelScope.launch {
+            when (val result = ragRetriever.ingest(title, content, source, trustLevel)) {
+                is RagRetriever.IngestResult.Indexed -> {
+                    val note = if (result.report.findings.isEmpty()) {
+                        "Indexed '$title' (${result.chunkCount} chunks)"
+                    } else {
+                        "Indexed '$title' — ${result.report.findings.size} " +
+                                "injection pattern(s) stripped"
+                    }
+                    repository.addSystemNotice(note)
+                }
+                is RagRetriever.IngestResult.Rejected -> {
+                    val categories = result.report.findings
+                        .map { it.category.name.lowercase().replace('_', ' ') }
+                        .distinct()
+                        .joinToString(", ")
+                    repository.addSystemNotice(
+                        "Rejected '$title' — document contains: $categories"
+                    )
+                }
+                is RagRetriever.IngestResult.Failed -> {
+                    repository.addSystemNotice("Could not read '$title'")
+                }
+            }
+        }
+    }
+
+    fun clearDocuments() {
+        viewModelScope.launch {
+            ragRetriever.clearIndex()
+            repository.addSystemNotice("Document index cleared")
+        }
+    }
 }
+
+// ── ORDERING SUMMARY ───────────────────────────────────────────────────────
+// The full hardened path for one message:
+//
+//   1. InputFilter        regex → LLM classifier          (blocks direct injection)
+//   2. RagRetriever       embed → search → build context  (only if 1 passed)
+//   3. SystemPrompt       wrap the whole user turn
+//   4. LlmApiClient       TLS 1.3 + pinning + rate limit
+//   5. OutputModerator    scan each SSE chunk
+//   6. ConversationRepo   append → UI
+//
+// Steps 1 and 2 cannot be swapped. Steps 1, 2, and 5 are each independently
+// sufficient to stop the demo attacks — that is what makes this defence in
+// depth rather than a single filter with extra steps.
+
 
 // ─────────────────────────────────────────────────────────────────────
 // UI state
