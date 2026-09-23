@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+	<title></title>
+	<meta name="generator" content="LibreOffice 26.8.0.3 (Linux)"/>
+	<meta name="created" content="00:00:00"/>
+	<meta name="changed" content="00:00:00"/>
+	<style type="text/css">
+		@page { size: 8.27in 11.69in; margin: 0.79in }
+		p { margin-bottom: 0.1in; line-height: 115%; background: transparent }
+		h1 { margin-bottom: 0.08in; background: transparent; page-break-after: avoid }
+		h1.western { font-weight: bold; font-size: 18pt; font-family: "Liberation Sans", sans-serif }
+		h1.cjk { font-weight: bold; font-size: 18pt; font-family: "AR PL SungtiL GB" }
+		h1.ctl { font-weight: bold; font-family: "Noto Sans Devanagari"; font-size: 18pt }
+		pre { font-size: 10pt; font-family: "Liberation Mono", monospace; background: transparent }
+		h2 { margin-top: 0.14in; margin-bottom: 0.08in; background: transparent; page-break-after: avoid }
+		h2.western { font-weight: bold; font-size: 16pt; font-family: "Liberation Sans", sans-serif }
+		h2.cjk { font-weight: bold; font-size: 16pt; font-family: "AR PL SungtiL GB" }
+		h2.ctl { font-weight: bold; font-family: "Noto Sans Devanagari"; font-size: 16pt }
+		h3 { margin-top: 0.1in; margin-bottom: 0.08in; background: transparent; page-break-after: avoid }
+		h3.western { font-weight: bold; font-size: 14pt; font-family: "Liberation Sans", sans-serif }
+		h3.cjk { font-weight: bold; font-size: 14pt; font-family: "AR PL SungtiL GB" }
+		h3.ctl { font-weight: bold; font-family: "Noto Sans Devanagari"; font-size: 14pt }
+		td p { widows: 0; orphans: 0; background: transparent }
+		th p { orphans: 0; widows: 0; text-align: center; font-weight: bold; background: transparent }
+	</style>
+</head>
+<body lang="en-US" link="#000080" vlink="#800000" dir="ltr"><h1 class="western">
+I Built a Secure Android LLM Chat App. Then I Tried to Break It.</h1>
+<p><i>What jadx, apktool, and Frida taught me about the limits of
+on-device security.</i></p>
+<hr/>
+
+<p>When I set out to secure an Android chat app that talks to an LLM
+API, I did what most tutorials tell you to do. I moved the API key
+out of source control. I hardened the system prompt. I added
+certificate pinning. I encrypted secrets with the Android Keystore.
+The checklist looked complete.</p>
+<p>Then I picked up the tools an attacker would use — jadx,
+apktool, and Frida — and pointed them at my own APK. Some of my
+defenses held exactly as designed. Others fell in a single command.
+The gap between &quot;I followed the security checklist&quot; and &quot;my
+app is actually secure&quot; turned out to be wide, and it lives
+almost entirely in one distinction: <b>the difference between an
+attacker who reads your app and an attacker who runs it.</b></p>
+<p>This is a writeup of what I learned wearing both hats. The app is
+called VulnChat — a deliberately dual-mode LLM chat client I built
+with a <font face="Liberation Mono, monospace">SECURE_MODE</font>
+flag that flips the entire app between a vulnerable implementation
+and a hardened one. That flag let me attack the same feature in both
+states and watch precisely where each defense started and stopped
+mattering.</p>
+<hr/>
+
+<h2 class="western">The threat model I started with</h2>
+<p>An LLM chat app has a few assets worth stealing:</p>
+<ul>
+	<li><p><b>The API key.</b> It has real monetary value — anyone who
+	extracts it bills their usage to your account.</p></li>
+	<li><p><b>The system prompt.</b> It encodes your app's behavior and
+	guardrails. Leaking it hands an attacker the blueprint for bypassing
+	them.</p></li>
+	<li><p><b>The traffic.</b> Prompts and responses may contain user
+	data you don't want a network observer reading.</p></li>
+</ul>
+<p>My hardened build addressed all three on paper. The question was
+whether &quot;on paper&quot; survived contact with tooling.</p>
+<p>I sorted the tools into two camps, and that sorting turned out to
+be the whole story:</p>
+<ul>
+	<li><p><b>Static analysis</b> reads the app without running it:
+	jadx, apktool, <font face="Liberation Mono, monospace">strings</font>.</p></li>
+	<li><p><b>Dynamic analysis</b> runs the app and manipulates it live:
+	Frida.</p></li>
+</ul>
+<hr/>
+
+<h2 class="western">Round 1: Static analysis, and the defense that
+worked</h2>
+<h3 class="western">The vulnerable build falls in one command</h3>
+<p>The vulnerable build stores the API key the way an alarming number
+of real apps do — as a compile-time constant that lands in
+<font face="Liberation Mono, monospace">BuildConfig</font>. You don't
+even need a decompiler to find it. The humble <font face="Liberation Mono, monospace">strings</font>
+command, scanning the raw DEX bytecode, is enough:</p>
+<pre style="margin-bottom: 0.2in; background: #e1e1e1">unzip -o app-vulnerable.apk classes.dex -d extracted<br/>
+strings extracted/classes.dex | grep &quot;sk-ant&quot;
+sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxx...</pre><p>
+There it is. A 40-year-old Unix text utility, no reverse-engineering
+expertise required. This is the demonstration I find most persuasive,
+precisely because it's so unsophisticated. If <font face="Liberation Mono, monospace">strings</font>
+can find your key, the bar to steal it is on the floor.</p>
+<p><font face="Liberation Mono, monospace">jadx</font> tells the same
+story with more structure, reconstructing readable Java from the DEX:</p>
+<pre style="margin-bottom: 0.2in; background: #e1e1e1">jadx -d out app-vulnerable.apk<br/>
+grep -r &quot;sk-ant&quot; out/sources/
+// out/sources/com/vulnchat/BuildConfig.java<br/>
+public static final String LLM_API_KEY_PLAIN = &quot;sk-ant-api03-...&quot;;</pre><h3 class="western">
+The hardened build holds</h3>
+<p>Now the same commands against the hardened build. The key is no
+longer a constant — it's AES-256-GCM encrypted, the ciphertext
+lives in <font face="Liberation Mono, monospace">SharedPreferences</font>,
+and the encryption key is generated inside the Android Keystore,
+backed by hardware where the device supports it.</p>
+<pre style="margin-bottom: 0.2in; background: #e1e1e1">strings extracted/classes.dex | grep &quot;sk-ant&quot;     # nothing<br/>
+jadx -d out app-hardened.apk<br/>
+grep -r &quot;sk-ant&quot; out/sources/                       # nothing</pre><p>
+<font face="Liberation Mono, monospace">BuildConfig</font> now yields
+only a placeholder. Static analysis has nothing to grab. <b>This is
+the defense working exactly as intended</b> — against a static
+attacker.</p>
+<h3 class="western">apktool: reading the manifest, not the code</h3>
+<p>Where jadx reconstructs Java, apktool decodes resources and the
+manifest and stops at smali (Dalvik assembly). It sidesteps the
+decompilation edge cases that trip jadx on some builds, and it
+surfaces a different class of finding — configuration rather than
+logic:</p>
+<pre style="margin-bottom: 0.2in; background: #e1e1e1">apktool d app-hardened.apk -o out_hardened</pre><p>
+Comparing the two builds' decoded <font face="Liberation Mono, monospace">AndroidManifest.xml</font>
+makes the hardening legible at the config layer:</p>
+<pre style="margin-bottom: 0.2in; background: #e1e1e1">&lt;!-- Hardened --&gt;<br/>
+android:usesCleartextTraffic=&quot;false&quot;<br/>
+android:allowBackup=&quot;false&quot;<br/>
+android:networkSecurityConfig=&quot;@xml/network_security_config&quot;</pre><p>
+The <font face="Liberation Mono, monospace">network_security_config.xml</font>
+it extracts also reveals the certificate pins — which foreshadows
+the next round, because a pin an attacker can <i>read</i> is not the
+same as a pin an attacker can <i>defeat</i>.</p>
+<p><b>The static scorecard:</b> vulnerable build, total loss.
+Hardened build, holds the line. If this were the whole story, the
+Keystore checklist item would be vindicated and we'd stop here.
+Dynamic analysis is where that conclusion comes apart.</p>
+<hr/>
+
+<h2 class="western">Round 2: Dynamic analysis, and the defense that
+didn't hold</h2>
+<p>Static analysis only ever reads what's frozen in the APK. But a
+running app has to <i>use</i> its secrets — decrypt the key,
+present a certificate, evaluate a filter. Frida attaches to the live
+process and rewrites method behavior at runtime, which means it
+operates on those secrets at the exact moment they exist in the
+clear.</p>
+<p><i>(Frida needs a rooted device or emulator — it's the
+attacker's environment, not the average user's. That caveat matters
+for calibrating the real-world risk, and I'll come back to it.)</i></p>
+<h3 class="western">Hooking the key straight out of memory</h3>
+<p>Here's the uncomfortable truth about the Keystore defense:
+<font face="Liberation Mono, monospace">getApiKey()</font> <b>has to</b>
+return the plaintext key, or the network layer can't authenticate.
+However well-encrypted the key is at rest, the moment it's used it's
+plaintext in memory. Frida intercepts it right there:</p>
+<pre style="margin-bottom: 0.2in; background: #e1e1e1">Java.perform(function () {<br/>
+    var Provider = Java.use('com.vulnchat.security.ApiKeyProvider');<br/>
+<br/>
+    Provider.getApiKey.implementation = function () {<br/>
+        var key = this.getApiKey();   // let real decryption happen<br/>
+        console.log('[KEY RECOVERED] ' + key);<br/>
+        return key;                    // app keeps working, none the wiser<br/>
+    };<br/>
+});
+frida -U -f com.vulnchat.hardened -l hook_apikey.js</pre><p>
+Send one message in the app, and the full plaintext key prints to the
+console — <b>from the hardened build that defeated every static
+tool minutes earlier.</b> The hook observes without altering
+behavior, so the app runs normally and the user sees nothing.</p>
+<p>This isn't a flaw in the Keystore implementation. The Keystore did
+its job: it kept the key encrypted at rest and out of the APK. The
+point is subtler and more important — <b>encryption at rest doesn't
+protect a secret from an attacker who is present at the moment of
+use.</b></p>
+<h3 class="western">Bypassing certificate pinning</h3>
+<p>Certificate pinning was supposed to stop traffic interception.
+Against a network attacker, it does. Against an attacker inside the
+process, pinning is just client-side code — and client-side code on
+a rooted device isn't trustworthy. Neutralizing OkHttp's pinner takes
+a few lines:</p>
+<pre style="margin-bottom: 0.2in; background: #e1e1e1">var CertificatePinner = Java.use('okhttp3.CertificatePinner');<br/>
+CertificatePinner.check.overload('java.lang.String', 'java.util.List')<br/>
+    .implementation = function (hostname, peerCertificates) {<br/>
+        return;   // a pin check that never fails<br/>
+    };</pre><p>
+With the check defanged and an intercepting proxy in place, the
+request — API key header, full prompt, everything — is readable
+in cleartext against the pinned build.</p>
+<p>Worth being precise here: my hardened build pins at <i>two</i>
+layers, OkHttp and the OS Network Security Config. Frida handles the
+OkHttp layer; the OS layer still requires installing the interception
+CA as a system certificate on the rooted device. Two layers meant the
+bypass wasn't a one-liner — which is the honest, if modest,
+dividend of defense in depth.</p>
+<hr/>
+
+<h2 class="western">What the escalation ladder actually teaches</h2>
+<p>Lining up the two rounds produces a ladder, and each rung
+motivates the next:</p>
+<table width="100%" cellpadding="4" cellspacing="0">
+	<col width="85*"/>
+	<col width="85*"/>
+	<col width="85*"/>
+	<thead>
+		<tr valign="top">
+			<th width="33%" style="border-top: 1px solid #000000; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0.04in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p align="left">
+				Defense</p>
+			</th>
+			<th width="33%" style="border-top: 1px solid #000000; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0.04in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p align="left">
+				Static analysis</p>
+			</th>
+			<th width="33%" style="border: 1px solid #000000; padding: 0.04in"><p align="left">
+				Dynamic analysis (rooted)</p>
+			</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr valign="top">
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p align="left">
+				Key in BuildConfig</p>
+			</td>
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p>
+				<b>Broken</b> — <font face="Liberation Mono, monospace">strings</font>
+				finds it</p>
+			</td>
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: 1px solid #000000; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0.04in"><p align="left">
+				Broken</p>
+			</td>
+		</tr>
+		<tr valign="top">
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p align="left">
+				Key in Keystore</p>
+			</td>
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p align="left">
+				Holds — only ciphertext</p>
+			</td>
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: 1px solid #000000; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0.04in"><p>
+				<b>Broken</b> — hooked from memory</p>
+			</td>
+		</tr>
+		<tr valign="top">
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p align="left">
+				Certificate pinning</p>
+			</td>
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: none; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0in"><p align="left">
+				Holds — it's runtime-enforced</p>
+			</td>
+			<td width="33%" style="border-top: none; border-bottom: 1px solid #000000; border-left: 1px solid #000000; border-right: 1px solid #000000; padding-top: 0in; padding-bottom: 0.04in; padding-left: 0.04in; padding-right: 0.04in"><p>
+				<b>Broken</b> — pinner neutralized</p>
+			</td>
+		</tr>
+	</tbody>
+</table>
+<p><br/>
+<br/>
+
+</p>
+<p>The pattern is what matters. Every on-device defense I added
+raised the bar for the <i>next</i> class of attacker without ever
+reaching &quot;unbreakable.&quot; Keystore defeats static analysis
+and forces the attacker to escalate to a rooted device and runtime
+instrumentation. That escalation is not nothing — it's a real
+increase in attacker cost and a real narrowing of who can pull it
+off. But it is a speed bump, not a wall.</p>
+<p>Which leads to the conclusion I didn't have when I started: <b>for
+a truly sensitive secret, the fix isn't better on-device protection.
+It's not putting the secret on the device at all.</b></p>
+<p>A backend proxy is the architectural answer. The app authenticates
+to a server you control; the server holds the real API key and talks
+to the LLM. The key is never in the APK, never in the device's
+memory, never hookable — because it was never there. Frida can
+still lift the session token, but a short-lived, narrowly-scoped
+token has a bounded blast radius that a long-lived API key never
+will. It's the one design on the ladder that doesn't eventually fall
+to the next rung, because it removes the asset from the attacker's
+reach entirely.</p>
+<hr/>
+
+<h2 class="western">The honest caveat, and why it doesn't rescue the
+checklist</h2>
+<p>Every dynamic attack here needs root. The overwhelming majority of
+your users aren't running a rooted device with a matching
+<font face="Liberation Mono, monospace">frida-server</font>, so the
+practical risk to any single user's data is lower than a raw reading
+of the ladder suggests. Client-side hardening is genuinely worth
+doing — it defeats casual static analysis, raises attacker cost,
+and protects ordinary users.</p>
+<p>But &quot;the attacker needs root&quot; is not a defense for the
+asset that <i>is</i> the target. An API key isn't tied to a victim's
+device — an attacker extracts it from <i>their own</i> rooted
+device and bills <i>your</i> account. For that asset, &quot;most
+users aren't rooted&quot; is irrelevant, because the attacker only
+needs to root the one device they own. This is exactly the class of
+secret that belongs behind a proxy, and exactly why the checklist —
+which quietly assumes a static or network attacker — gives false
+comfort.</p>
+<hr/>
+
+<h2 class="western">What I'd tell my past self</h2>
+<ol>
+	<li><p><b>Sort your defenses by which attacker they stop.</b>
+	Static, network, and runtime attackers are different threats. A
+	control that stops one may do nothing against another, and a
+	checklist that doesn't name the attacker is hiding that gap.</p></li>
+	<li><p><b>Encryption at rest is not encryption in use.</b> Keystore
+	protects a key in storage. It does nothing at the moment of use,
+	which is exactly when a runtime attacker is watching.</p></li>
+	<li><p><b>Client-side controls delay a runtime attacker; they never
+	defeat one.</b> Pinning, obfuscation, root detection — all speed
+	bumps. Useful, finite, not solutions.</p></li>
+	<li><p><b>The only way to protect a secret from the device is to
+	keep it off the device.</b> For anything genuinely sensitive, that
+	means a backend proxy and short-lived tokens.</p></li>
+</ol>
+<p>Attacking my own app taught me more than building it did.
+Following the checklist produced an app that <i>looked</i> secure and
+stopped the attacker I had implicitly imagined — someone reading
+the APK. It was picking up Frida, and watching a &quot;hardened&quot;
+key print to my console, that showed me the attacker I hadn't
+imagined, and the one architectural decision that actually holds up.</p>
+<p>If you build LLM apps on mobile: put the key behind a proxy.
+Everything else on the checklist is worth doing, but that's the line
+between raising the bar and actually protecting the asset.</p>
+<hr/>
+
+<p><i>VulnChat is a personal project built to explore mobile and AI
+security. All reverse engineering described here was performed
+against my own application. The techniques are standard practice in
+mobile security assessments; the tools — jadx, apktool, and Frida —
+are staples of any Android security engagement.</i></p>
+<p><br/>
+<br/>
+
+</p>
+</body>
+</html>
