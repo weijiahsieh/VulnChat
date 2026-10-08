@@ -64,6 +64,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vulnchat.BuildConfig
 import com.vulnchat.R
 import com.vulnchat.data.UiMessage
+import androidx.compose.material.icons.filled.Add
+
 
 // ─────────────────────────────────────────────────────────────────────
 // Screen entry point
@@ -76,6 +78,8 @@ fun ChatScreen(
 ) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val uiState  by viewModel.uiState.collectAsStateWithLifecycle()
+    val indexedCount by viewModel.indexedDocumentCount.collectAsStateWithLifecycle()
+    var showDocumentSheet by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     // Auto-scroll to the latest message whenever the list changes
@@ -102,6 +106,22 @@ fun ChatScreen(
                                 contentDescription = "Clear conversation"
                             )
                         }
+                        IconButton(onClick = { showDocumentSheet = true }) {
+                            // A tiny count badge communicates index state at a glance;
+                            // falls back to a plain icon when empty.
+                            if (indexedCount > 0) {
+                                Text(
+                                    text  = indexedCount.toString(),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Icon(
+                                imageVector        = Icons.Default.Add,
+                                contentDescription = "Manage documents"
+                            )
+                        }
+
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface
@@ -134,6 +154,23 @@ fun ChatScreen(
                 MessageBubble(message = message)
             }
         }
+    }
+
+    if (showDocumentSheet) {
+        DocumentSheet(
+            indexedCount          = indexedCount,
+            embeddingLeavesDevice = viewModel.embeddingLeavesDevice,
+            onIngest              = { title, content, source, trust ->
+                viewModel.ingestDocument(title, content, source, trust)
+            },
+            onPickFile            = { uri ->
+                viewModel.ingestFromUri(uri)
+            },
+            onClear               = {
+                viewModel.clearDocuments()
+            },
+            onDismiss             = { showDocumentSheet = false }
+        )
     }
 }
 

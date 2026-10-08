@@ -25,6 +25,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import com.vulnchat.rag.RagRetriever
 import com.vulnchat.rag.TrustLevel
+import android.net.Uri
+import android.provider.OpenableColumns
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * ChatViewModel — the central coordinator for the VulnChat conversation flow.
@@ -369,6 +373,129 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Reads a user-picked file and ingests its text.
+     *
+     * Called by the DocumentSheet file picker. The Uri comes from SAF, which
+     * means the read grant is scoped to exactly this file for this result —
+     * the app has no broader storage access.
+     *
+     * Trust level is USER: the person deliberately chose this file, same as the
+     * paste path. (A file on disk could in principle have originated anywhere,
+     * but the trust label reflects the user's deliberate selection, and
+     * DocumentSanitizer treats the *content* with suspicion regardless of label.)
+     */
+    fun ingestFromUri(uri: Uri) {
+        viewModelScope.launch {
+            when (val read = readTextFromUri(uri)) {
+                is FileRead.Success ->
+                    ingestDocument(
+                        title      = read.name,
+                        content    = read.text,
+                        source     = "file: ${read.name}",
+                        trustLevel = TrustLevel.USER
+                    )
+                is FileRead.Error ->
+                    repository.addSystemNotice("⚠ ${read.message}")
+            }
+        }
+    }
+
+    private sealed class FileRead {
+        data class Success(val name: String, val text: String) : FileRead()
+        data class Error(val message: String) : FileRead()
+    }
+
+    private companion object {
+        const val MAX_FILE_BYTES = 1_000_000L      // 1 MB hard ceiling
+        const val MAX_FILE_CHARS = 200_000         // defensive read cap
+
+        val TEXTUAL_MIME = setOf(
+            "application/json",
+            "application/xml",
+            "application/x-yaml",
+            "application/markdown"
+        )
+        val TEXTUAL_EXT = setOf("txt", "md", "markdown", "csv", "tsv", "json", "xml", "log", "yaml", "yml")
+    }
+
+    /**
+     * Reads text from [uri] on the IO dispatcher, with three guards:
+     *   1. Type check — only text-like content; binary files are refused with
+     *      a clear message rather than ingested as garbage.
+     *   2. Size check — refuse files over the byte cap before reading, so a
+     *      huge file can't exhaust memory.
+     *   3. Defensive read cap — even if the size column lies or is absent,
+     *      the read itself stops at MAX_FILE_CHARS.
+     */
+    private suspend fun readTextFromUri(uri: Uri): FileRead = withContext(Dispatchers.IO) {
+        try {
+            val resolver = getApplication<Application>().contentResolver
+
+            // ── filename + size from the content provider ──────────────────
+            var name = "picked file"
+            var size = -1L
+            resolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0 && !c.isNull(nameIdx)) name = c.getString(nameIdx)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+                }
+            }
+
+            // ── type guard ─────────────────────────────────────────────────
+            val mime = resolver.getType(uri).orEmpty()
+            val looksTextual =
+                mime.startsWith("text/") ||
+                        mime in TEXTUAL_MIME ||
+                        name.substringAfterLast('.', "").lowercase() in TEXTUAL_EXT
+            if (!looksTextual) {
+                return@withContext FileRead.Error(
+                    "Can't read '$name' — only text files are supported. " +
+                            "(PDF/Office extraction would need a parsing library.)"
+                )
+            }
+
+            // ── size guard (when the provider reports it) ──────────────────
+            if (size in 1 until Long.MAX_VALUE && size > MAX_FILE_BYTES) {
+                return@withContext FileRead.Error(
+                    "'$name' is too large (${size / 1024} KB). Limit is " +
+                            "${MAX_FILE_BYTES / 1024} KB."
+                )
+            }
+
+            // ── read with a defensive character cap ────────────────────────
+            val text = resolver.openInputStream(uri)?.use { stream ->
+                val reader = stream.bufferedReader()
+                val buf = StringBuilder()
+                val chunk = CharArray(8_192)
+                while (true) {
+                    val n = reader.read(chunk)
+                    if (n < 0) break
+                    buf.append(chunk, 0, n)
+                    if (buf.length >= MAX_FILE_CHARS) break   // stop even if size lied
+                }
+                buf.toString()
+            } ?: return@withContext FileRead.Error("Couldn't open '$name'.")
+
+            if (text.isBlank()) {
+                return@withContext FileRead.Error("'$name' is empty or not readable text.")
+            }
+
+            FileRead.Success(name, text)
+        } catch (e: SecurityException) {
+            FileRead.Error("No permission to read that file.")
+        } catch (e: Exception) {
+            FileRead.Error("Couldn't read file: ${e.message ?: "unknown error"}")
+        }
+    }
+
+
     fun clearDocuments() {
         viewModelScope.launch {
             ragRetriever.clearIndex()
@@ -376,6 +503,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 }
+
+
 
 // ── ORDERING SUMMARY ───────────────────────────────────────────────────────
 // The full hardened path for one message:
