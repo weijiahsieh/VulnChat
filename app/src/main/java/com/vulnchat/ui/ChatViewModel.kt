@@ -1,6 +1,8 @@
 package com.vulnchat.ui
 
 import android.app.Application
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vulnchat.BuildConfig
@@ -12,10 +14,13 @@ import com.vulnchat.network.LlmNetworkException
 import com.vulnchat.network.LlmApiException
 import com.vulnchat.network.RateLimitException
 import com.vulnchat.network.StreamEvent
+import com.vulnchat.rag.RagRetriever
+import com.vulnchat.rag.TrustLevel
 import com.vulnchat.security.InputFilter
 import com.vulnchat.security.OutputModerator
 import com.vulnchat.security.SystemPrompt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,17 +28,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import com.vulnchat.rag.RagRetriever
-import com.vulnchat.rag.TrustLevel
-import android.net.Uri
-import android.provider.OpenableColumns
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
  * ChatViewModel — the central coordinator for the VulnChat conversation flow.
  *
- * This is where all four security layers are wired together:
+ * This is where all security layers are wired together:
  *
  *   User sends message
  *       │
@@ -41,7 +41,10 @@ import kotlinx.coroutines.withContext
  *   [InputFilter]          Stage 1: regex  →  Stage 2: LLM classifier
  *       │ Clean
  *       ▼
- *   [SystemPrompt]         Wraps user message in structural delimiter
+ *   [RagRetriever]         embed → search → build context (if docs indexed)
+ *       │
+ *       ▼
+ *   [SystemPrompt]         Wraps the whole user turn in a structural boundary
  *       │
  *       ▼
  *   [LlmApiClient]         TLS 1.3 + cert pinning + rate limiter + SSE stream
@@ -53,10 +56,10 @@ import kotlinx.coroutines.withContext
  *   [ConversationRepository]  Appends delta → ChatScreen observes StateFlow
  *
  * SECURE_MODE flag:
- *   false → InputFilter is bypassed, OutputModerator is bypassed, naive
- *           SystemPrompt used. Raw attack surface exposed for demo.
- *   true  → All gates active. Each layer independently sufficient to block
- *           the demonstrated attacks (defence in depth).
+ *   false → InputFilter bypassed, OutputModerator bypassed, naive SystemPrompt,
+ *           naive retrieval. Raw attack surface exposed for demo.
+ *   true  → All gates active. Each layer independently sufficient to block the
+ *           demonstrated attacks (defence in depth).
  *
  * Debug-only bypass:
  *   Set [skipInputFilter] = true to demonstrate OutputModerator in isolation
@@ -82,6 +85,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val apiClient     = LlmApiClient(app.apiKeyProvider)
     private val inputFilter   = InputFilter(apiClient)
     private val outputMod     = OutputModerator()
+    private val ragRetriever  = RagRetriever()
 
     // ─────────────────────────────────────────────────────────────────
     // UI state exposed to ChatScreen
@@ -92,15 +96,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
-    // Tracks the active streaming job so the user can cancel mid-response
-    private var streamingJob: Job? = null
-
-    private val ragRetriever = RagRetriever()
-
+    /** Number of documents currently in the RAG index. */
     val indexedDocumentCount: StateFlow<Int> get() = ragRetriever.documentCount
 
     /** True when the configured embedding provider sends text off-device. */
     val embeddingLeavesDevice: Boolean get() = ragRetriever.embeddingTransmitsOffDevice
+
+    // Tracks the active streaming job so the user can cancel mid-response
+    private var streamingJob: Job? = null
 
     // ─────────────────────────────────────────────────────────────────
     // User actions
@@ -156,9 +159,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            val sanitisedInput = filterResult.sanitised
+            val sanitisedInput = (filterResult as InputFilter.FilterResult.Clean).sanitised
 
-            // ── RAG retrieval ────────────────────────────────────────────
+            // ── RAG retrieval ────────────────────────────────────────────────
             // Runs AFTER InputFilter, never before. A blocked query must not
             // be embedded: it wastes a call, and on the remote-embedding path
             // it would transmit the attacker's payload off-device. This
@@ -216,6 +219,166 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         cancelStreaming()
         repository.clear()
         outputMod.reset()
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Document management (RAG)
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Ingests a document into the RAG index.
+     *
+     * [trustLevel] defaults to USER because this path is a deliberate user
+     * action — they chose the file. Content arriving from a share intent or
+     * a fetched URL must pass UNTRUSTED explicitly.
+     */
+    fun ingestDocument(
+        title: String,
+        content: String,
+        source: String,
+        trustLevel: TrustLevel = TrustLevel.USER
+    ) {
+        viewModelScope.launch {
+            when (val result = ragRetriever.ingest(title, content, source, trustLevel)) {
+                is RagRetriever.IngestResult.Indexed -> {
+                    val note = if (result.report.findings.isEmpty()) {
+                        "Indexed '$title' (${result.chunkCount} chunks)"
+                    } else {
+                        "Indexed '$title' — ${result.report.findings.size} " +
+                        "injection pattern(s) stripped"
+                    }
+                    repository.addSystemNotice(note)
+                }
+                is RagRetriever.IngestResult.Rejected -> {
+                    val categories = result.report.findings
+                        .map { it.category.name.lowercase().replace('_', ' ') }
+                        .distinct()
+                        .joinToString(", ")
+                    repository.addSystemNotice(
+                        "Rejected '$title' — document contains: $categories"
+                    )
+                }
+                is RagRetriever.IngestResult.Failed -> {
+                    repository.addSystemNotice("Could not read '$title'")
+                }
+            }
+        }
+    }
+
+    /**
+     * Reads a user-picked file and ingests its text.
+     *
+     * Called by the DocumentSheet file picker. The Uri comes from SAF, which
+     * means the read grant is scoped to exactly this file for this result —
+     * the app has no broader storage access.
+     *
+     * Trust level is USER: the person deliberately chose this file, same as the
+     * paste path. (A file on disk could in principle have originated anywhere,
+     * but the trust label reflects the user's deliberate selection, and
+     * DocumentSanitizer treats the *content* with suspicion regardless of label.)
+     */
+    fun ingestFromUri(uri: Uri) {
+        viewModelScope.launch {
+            when (val read = readTextFromUri(uri)) {
+                is FileRead.Success ->
+                    ingestDocument(
+                        title      = read.name,
+                        content    = read.text,
+                        source     = "file: ${read.name}",
+                        trustLevel = TrustLevel.USER
+                    )
+                is FileRead.Error ->
+                    repository.addSystemNotice("⚠ ${read.message}")
+            }
+        }
+    }
+
+    fun clearDocuments() {
+        viewModelScope.launch {
+            ragRetriever.clearIndex()
+            repository.addSystemNotice("Document index cleared")
+        }
+    }
+
+    private sealed class FileRead {
+        data class Success(val name: String, val text: String) : FileRead()
+        data class Error(val message: String) : FileRead()
+    }
+
+    /**
+     * Reads text from [uri] on the IO dispatcher, with three guards:
+     *   1. Type check — only text-like content; binary files are refused with
+     *      a clear message rather than ingested as garbage.
+     *   2. Size check — refuse files over the byte cap before reading, so a
+     *      huge file can't exhaust memory.
+     *   3. Defensive read cap — even if the size column lies or is absent,
+     *      the read itself stops at MAX_FILE_CHARS.
+     */
+    private suspend fun readTextFromUri(uri: Uri): FileRead = withContext(Dispatchers.IO) {
+        try {
+            val resolver = getApplication<Application>().contentResolver
+
+            // ── filename + size from the content provider ──────────────────
+            var name = "picked file"
+            var size = -1L
+            resolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0 && !c.isNull(nameIdx)) name = c.getString(nameIdx)
+                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+                }
+            }
+
+            // ── type guard ─────────────────────────────────────────────────
+            val mime = resolver.getType(uri).orEmpty()
+            val looksTextual =
+                mime.startsWith("text/") ||
+                mime in TEXTUAL_MIME ||
+                name.substringAfterLast('.', "").lowercase() in TEXTUAL_EXT
+            if (!looksTextual) {
+                return@withContext FileRead.Error(
+                    "Can't read '$name' — only text files are supported. " +
+                    "(PDF/Office extraction would need a parsing library.)"
+                )
+            }
+
+            // ── size guard (when the provider reports it) ──────────────────
+            if (size in 1 until Long.MAX_VALUE && size > MAX_FILE_BYTES) {
+                return@withContext FileRead.Error(
+                    "'$name' is too large (${size / 1024} KB). Limit is " +
+                    "${MAX_FILE_BYTES / 1024} KB."
+                )
+            }
+
+            // ── read with a defensive character cap ────────────────────────
+            val text = resolver.openInputStream(uri)?.use { stream ->
+                val reader = stream.bufferedReader()
+                val buf = StringBuilder()
+                val chunk = CharArray(8_192)
+                while (true) {
+                    val n = reader.read(chunk)
+                    if (n < 0) break
+                    buf.append(chunk, 0, n)
+                    if (buf.length >= MAX_FILE_CHARS) break   // stop even if size lied
+                }
+                buf.toString()
+            } ?: return@withContext FileRead.Error("Couldn't open '$name'.")
+
+            if (text.isBlank()) {
+                return@withContext FileRead.Error("'$name' is empty or not readable text.")
+            }
+
+            FileRead.Success(name, text)
+        } catch (e: SecurityException) {
+            FileRead.Error("No permission to read that file.")
+        } catch (e: Exception) {
+            FileRead.Error("Couldn't read file: ${e.message ?: "unknown error"}")
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -333,79 +496,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Ingests a document into the RAG index.
-     *
-     * [trustLevel] defaults to USER because this path is a deliberate user
-     * action — they chose the file. Content arriving from a share intent or
-     * a fetched URL must pass UNTRUSTED explicitly.
-     */
-    fun ingestDocument(
-        title: String,
-        content: String,
-        source: String,
-        trustLevel: TrustLevel = TrustLevel.USER
-    ) {
-        viewModelScope.launch {
-            when (val result = ragRetriever.ingest(title, content, source, trustLevel)) {
-                is RagRetriever.IngestResult.Indexed -> {
-                    val note = if (result.report.findings.isEmpty()) {
-                        "Indexed '$title' (${result.chunkCount} chunks)"
-                    } else {
-                        "Indexed '$title' — ${result.report.findings.size} " +
-                                "injection pattern(s) stripped"
-                    }
-                    repository.addSystemNotice(note)
-                }
-                is RagRetriever.IngestResult.Rejected -> {
-                    val categories = result.report.findings
-                        .map { it.category.name.lowercase().replace('_', ' ') }
-                        .distinct()
-                        .joinToString(", ")
-                    repository.addSystemNotice(
-                        "Rejected '$title' — document contains: $categories"
-                    )
-                }
-                is RagRetriever.IngestResult.Failed -> {
-                    repository.addSystemNotice("Could not read '$title'")
-                }
-            }
-        }
-    }
-
-    /**
-     * Reads a user-picked file and ingests its text.
-     *
-     * Called by the DocumentSheet file picker. The Uri comes from SAF, which
-     * means the read grant is scoped to exactly this file for this result —
-     * the app has no broader storage access.
-     *
-     * Trust level is USER: the person deliberately chose this file, same as the
-     * paste path. (A file on disk could in principle have originated anywhere,
-     * but the trust label reflects the user's deliberate selection, and
-     * DocumentSanitizer treats the *content* with suspicion regardless of label.)
-     */
-    fun ingestFromUri(uri: Uri) {
-        viewModelScope.launch {
-            when (val read = readTextFromUri(uri)) {
-                is FileRead.Success ->
-                    ingestDocument(
-                        title      = read.name,
-                        content    = read.text,
-                        source     = "file: ${read.name}",
-                        trustLevel = TrustLevel.USER
-                    )
-                is FileRead.Error ->
-                    repository.addSystemNotice("⚠ ${read.message}")
-            }
-        }
-    }
-
-    private sealed class FileRead {
-        data class Success(val name: String, val text: String) : FileRead()
-        data class Error(val message: String) : FileRead()
-    }
-
     private companion object {
         const val MAX_FILE_BYTES = 1_000_000L      // 1 MB hard ceiling
         const val MAX_FILE_CHARS = 200_000         // defensive read cap
@@ -418,108 +508,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
         val TEXTUAL_EXT = setOf("txt", "md", "markdown", "csv", "tsv", "json", "xml", "log", "yaml", "yml")
     }
-
-    /**
-     * Reads text from [uri] on the IO dispatcher, with three guards:
-     *   1. Type check — only text-like content; binary files are refused with
-     *      a clear message rather than ingested as garbage.
-     *   2. Size check — refuse files over the byte cap before reading, so a
-     *      huge file can't exhaust memory.
-     *   3. Defensive read cap — even if the size column lies or is absent,
-     *      the read itself stops at MAX_FILE_CHARS.
-     */
-    private suspend fun readTextFromUri(uri: Uri): FileRead = withContext(Dispatchers.IO) {
-        try {
-            val resolver = getApplication<Application>().contentResolver
-
-            // ── filename + size from the content provider ──────────────────
-            var name = "picked file"
-            var size = -1L
-            resolver.query(
-                uri,
-                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
-                null, null, null
-            )?.use { c ->
-                if (c.moveToFirst()) {
-                    val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
-                    if (nameIdx >= 0 && !c.isNull(nameIdx)) name = c.getString(nameIdx)
-                    if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
-                }
-            }
-
-            // ── type guard ─────────────────────────────────────────────────
-            val mime = resolver.getType(uri).orEmpty()
-            val looksTextual =
-                mime.startsWith("text/") ||
-                        mime in TEXTUAL_MIME ||
-                        name.substringAfterLast('.', "").lowercase() in TEXTUAL_EXT
-            if (!looksTextual) {
-                return@withContext FileRead.Error(
-                    "Can't read '$name' — only text files are supported. " +
-                            "(PDF/Office extraction would need a parsing library.)"
-                )
-            }
-
-            // ── size guard (when the provider reports it) ──────────────────
-            if (size in 1 until Long.MAX_VALUE && size > MAX_FILE_BYTES) {
-                return@withContext FileRead.Error(
-                    "'$name' is too large (${size / 1024} KB). Limit is " +
-                            "${MAX_FILE_BYTES / 1024} KB."
-                )
-            }
-
-            // ── read with a defensive character cap ────────────────────────
-            val text = resolver.openInputStream(uri)?.use { stream ->
-                val reader = stream.bufferedReader()
-                val buf = StringBuilder()
-                val chunk = CharArray(8_192)
-                while (true) {
-                    val n = reader.read(chunk)
-                    if (n < 0) break
-                    buf.append(chunk, 0, n)
-                    if (buf.length >= MAX_FILE_CHARS) break   // stop even if size lied
-                }
-                buf.toString()
-            } ?: return@withContext FileRead.Error("Couldn't open '$name'.")
-
-            if (text.isBlank()) {
-                return@withContext FileRead.Error("'$name' is empty or not readable text.")
-            }
-
-            FileRead.Success(name, text)
-        } catch (e: SecurityException) {
-            FileRead.Error("No permission to read that file.")
-        } catch (e: Exception) {
-            FileRead.Error("Couldn't read file: ${e.message ?: "unknown error"}")
-        }
-    }
-
-
-    fun clearDocuments() {
-        viewModelScope.launch {
-            ragRetriever.clearIndex()
-            repository.addSystemNotice("Document index cleared")
-        }
-    }
 }
-
-
-
-// ── ORDERING SUMMARY ───────────────────────────────────────────────────────
-// The full hardened path for one message:
-//
-//   1. InputFilter        regex → LLM classifier          (blocks direct injection)
-//   2. RagRetriever       embed → search → build context  (only if 1 passed)
-//   3. SystemPrompt       wrap the whole user turn
-//   4. LlmApiClient       TLS 1.3 + pinning + rate limit
-//   5. OutputModerator    scan each SSE chunk
-//   6. ConversationRepo   append → UI
-//
-// Steps 1 and 2 cannot be swapped. Steps 1, 2, and 5 are each independently
-// sufficient to stop the demo attacks — that is what makes this defence in
-// depth rather than a single filter with extra steps.
-
 
 // ─────────────────────────────────────────────────────────────────────
 // UI state

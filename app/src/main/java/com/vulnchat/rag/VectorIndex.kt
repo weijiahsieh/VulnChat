@@ -1,5 +1,6 @@
 package com.vulnchat.rag
 
+import com.vulnchat.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,7 +61,7 @@ class VectorIndex(private val expectedDimensions: Int) {
             }
             require(embedding.size == expectedDimensions) {
                 "Chunk ${chunk.id} has ${embedding.size} dimensions, " +
-                "index expects $expectedDimensions"
+                        "index expects $expectedDimensions"
             }
         }
         chunks += newChunks
@@ -127,11 +128,23 @@ class VectorIndex(private val expectedDimensions: Int) {
         val snapshot = mutex.withLock { chunks.toList() }
         if (snapshot.isEmpty()) return@withContext emptyList()
 
+        // The trust penalty and the score floor are HARDENING controls. They
+        // must only run in the hardened build. In the vulnerable build the
+        // retrieval is deliberately naive — no trust awareness, no floor — so
+        // that a planted document is actually retrieved (and its injection
+        // reaches the model), which is the whole point of the demo. Leaving
+        // these ungated silently filtered poisoned documents out of the
+        // vulnerable build, making the indirect-injection demo look like a no-op.
         val scored = snapshot.mapNotNull { chunk ->
             val embedding = chunk.embedding ?: return@mapNotNull null
             val raw = cosineSimilarity(queryEmbedding, embedding)
-            val adjusted = raw * trustMultiplier(chunk.trustLevel)
-            if (adjusted < minScore) null else ScoredChunk(chunk, adjusted)
+            val adjusted = if (BuildConfig.SECURE_MODE) {
+                raw * trustMultiplier(chunk.trustLevel)
+            } else {
+                raw   // naive retrieval — no trust penalty
+            }
+            val floor = if (BuildConfig.SECURE_MODE) minScore else 0f
+            if (adjusted < floor) null else ScoredChunk(chunk, adjusted)
         }
 
         // Rank, then apply the per-document cap while walking the ranked list

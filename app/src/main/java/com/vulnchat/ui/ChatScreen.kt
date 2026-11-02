@@ -26,13 +26,14 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -56,16 +57,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vulnchat.BuildConfig
 import com.vulnchat.R
 import com.vulnchat.data.UiMessage
-import androidx.compose.material.icons.filled.Add
-
 
 // ─────────────────────────────────────────────────────────────────────
 // Screen entry point
@@ -79,8 +80,9 @@ fun ChatScreen(
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val uiState  by viewModel.uiState.collectAsStateWithLifecycle()
     val indexedCount by viewModel.indexedDocumentCount.collectAsStateWithLifecycle()
-    var showDocumentSheet by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+
+    var showDocumentSheet by remember { mutableStateOf(false) }
 
     // Auto-scroll to the latest message whenever the list changes
     LaunchedEffect(messages.size) {
@@ -100,15 +102,10 @@ fun ChatScreen(
                         )
                     },
                     actions = {
-                        IconButton(onClick = { viewModel.clearConversation() }) {
-                            Icon(
-                                imageVector        = Icons.Default.Clear,
-                                contentDescription = "Clear conversation"
-                            )
-                        }
+                        // Document-management entry point. The count badge
+                        // communicates index state at a glance; falls back to a
+                        // plain icon when empty.
                         IconButton(onClick = { showDocumentSheet = true }) {
-                            // A tiny count badge communicates index state at a glance;
-                            // falls back to a plain icon when empty.
                             if (indexedCount > 0) {
                                 Text(
                                     text  = indexedCount.toString(),
@@ -121,7 +118,12 @@ fun ChatScreen(
                                 contentDescription = "Manage documents"
                             )
                         }
-
+                        IconButton(onClick = { viewModel.clearConversation() }) {
+                            Icon(
+                                imageVector        = Icons.Default.Clear,
+                                contentDescription = "Clear conversation"
+                            )
+                        }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface
@@ -156,6 +158,7 @@ fun ChatScreen(
         }
     }
 
+    // ── Document-management sheet ────────────────────────────────────────────
     if (showDocumentSheet) {
         DocumentSheet(
             indexedCount          = indexedCount,
@@ -417,7 +420,7 @@ private fun MessageInputBar(
                     enabled  = inputText.isNotBlank()
                 ) {
                     Icon(
-                        imageVector        = Icons.AutoMirrored.Filled.Send,
+                        imageVector        = Icons.Default.Send,
                         contentDescription = stringResource(R.string.button_send),
                         tint               = if (inputText.isNotBlank())
                                                  MaterialTheme.colorScheme.primary
