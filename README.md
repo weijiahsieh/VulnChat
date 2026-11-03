@@ -170,7 +170,7 @@ The escalation ladder this proves: static analysis is defeated by the hardened b
 The RAG attack: a planted document, not the user's message, carries the payload.
 
 1. Tap **+** in the chat screen → **Poisoned: marker injection (reliable)**.
-2. **Vulnerable build** → ask any question (e.g. "what was endpoint coverage?"). The retrieved document's injected instruction fires: every reply ends with `[[INJECTED-7781]]`. A "Referenced: …" notice confirms the document was retrieved.
+2. **Vulnerable build** → ask any question (e.g. "what was endpoint coverage?"). The retrieved document's injected instruction fires: every reply ends with `[[Happy to serve you.-7781]]`. A "Referenced: …" notice confirms the document was retrieved.
 3. **Hardened build** → load the same sample. `DocumentSanitizer` rejects it at ingestion ("contains: instruction override"); the marker never appears.
 4. For the dramatic variant, use **Poisoned: prompt disclosure** on the vulnerable build — the decoy "secret" planted in the vulnerable system prompt leaks into the chat.
 
